@@ -4,24 +4,36 @@ function getToken() {
   return localStorage.getItem("freshline_token");
 }
 
-async function request(path, { method = "GET", body, auth = true } = {}) {
+async function request(path, { method = "GET", body, auth = true, timeout = 30000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
   const headers = { "Content-Type": "application/json" };
   if (auth) {
     const token = getToken();
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const isJson = res.headers.get("content-type")?.includes("application/json");
-  const data = isJson ? await res.json() : null;
-  if (!res.ok) {
-    const message = data?.error || `Request failed (${res.status})`;
-    throw new Error(message);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const isJson = res.headers.get("content-type")?.includes("application/json");
+    const data = isJson ? await res.json() : null;
+    if (!res.ok) {
+      const message = data?.error || `Request failed (${res.status})`;
+      throw new Error(message);
+    }
+    return data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError") {
+      throw new Error("Server is warming up — please try again in a moment.");
+    }
+    throw err;
   }
-  return data;
 }
 
 export const api = {

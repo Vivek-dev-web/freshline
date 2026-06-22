@@ -138,8 +138,14 @@ def init_db():
     r = conn.fetchone()
     count = r["c"] if r else 0
     if count == 0:
-        _seed(conn)
-    conn.commit()
+        try:
+            _seed(conn)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            print(f"Seed skipped (likely concurrent init): {e}")
+    else:
+        conn.commit()
     conn.close()
 
 def _seed(conn):
@@ -149,15 +155,20 @@ def _seed(conn):
     cats = ["Staples","Dairy & Bakery","Snacks","Beverages","Personal Care","Vegetables & Fruits"]
     cat_ids = {}
     for c in cats:
-        cur.execute("INSERT INTO categories (name) VALUES (%s) RETURNING id", (c,))
-        cat_ids[c] = cur.fetchone()[0]
+        # ON CONFLICT DO UPDATE ensures RETURNING always fires even if row already exists
+        cur.execute("INSERT INTO categories (name) VALUES (%s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id", (c,))
+        cat_ids[c] = cur.fetchone()["id"]
     rets = [("Sharma General Store","Ramesh Sharma","Andheri West, Mumbai","9820011111"),
             ("Quick Mart Bandra","Priya Mehta","Bandra East, Mumbai","9820022222"),
             ("Daily Needs Powai","Suresh Iyer","Powai, Mumbai","9820033333")]
     rids = []
     for sn,on,ar,ph in rets:
-        cur.execute("INSERT INTO retailers (store_name,owner_name,area,phone,status,created_at) VALUES (%s,%s,%s,%s,'active',%s) RETURNING id",(sn,on,ar,ph,ts))
-        rids.append(cur.fetchone()[0])
+        cur.execute("INSERT INTO retailers (store_name,owner_name,area,phone,status,created_at) VALUES (%s,%s,%s,%s,'active',%s) ON CONFLICT DO NOTHING RETURNING id",(sn,on,ar,ph,ts))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("SELECT id FROM retailers WHERE phone=%s",(ph,))
+            row = cur.fetchone()
+        rids.append(row["id"])
     prods = [
         ("Toor Dal","Tata Sampann","Staples","1 kg",145.0,5.0,"🫘"),
         ("Basmati Rice","India Gate","Staples","5 kg",520.0,5.0,"🍚"),
@@ -182,43 +193,47 @@ def _seed(conn):
     ]
     pids = []
     for i,(name,brand,cat,pack,price,gst,emoji) in enumerate(prods):
-        cur.execute("INSERT INTO products (sku_code,name,brand,category_id,pack_size,base_price,gst_rate,image_emoji,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (f"SKU{1000+i}",name,brand,cat_ids[cat],pack,price,gst,emoji,ts))
-        pids.append(cur.fetchone()[0])
+        sku = f"SKU{1000+i}"
+        cur.execute("INSERT INTO products (sku_code,name,brand,category_id,pack_size,base_price,gst_rate,image_emoji,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (sku_code) DO UPDATE SET name=EXCLUDED.name RETURNING id",
+            (sku,name,brand,cat_ids[cat],pack,price,gst,emoji,ts))
+        pids.append(cur.fetchone()["id"])
     for rid in rids:
         for pid,(_, _,_,_,price,_,_) in zip(pids,prods):
             mk=random.uniform(1.03,1.12); ins=1 if random.random()>0.08 else 0
-            cur.execute("INSERT INTO retailer_products (retailer_id,product_id,selling_price,in_stock,quantity) VALUES (%s,%s,%s,%s,%s)",
+            cur.execute("INSERT INTO retailer_products (retailer_id,product_id,selling_price,in_stock,quantity) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (retailer_id,product_id) DO NOTHING",
                 (rid,pid,round(price*mk,2),ins,random.randint(5,80) if ins else 0))
-    cur.execute("INSERT INTO users (name,phone,password_hash,role,retailer_id,created_at) VALUES (%s,%s,%s,'admin',NULL,%s)",
+    cur.execute("INSERT INTO users (name,phone,password_hash,role,retailer_id,created_at) VALUES (%s,%s,%s,'admin',NULL,%s) ON CONFLICT (phone) DO NOTHING",
         ("Platform Admin","9999999999",hp("admin123"),ts))
     for i,(sn,on,ar,ph) in enumerate(rets):
-        cur.execute("INSERT INTO users (name,phone,password_hash,role,retailer_id,created_at) VALUES (%s,%s,%s,'retailer',%s,%s)",
+        cur.execute("INSERT INTO users (name,phone,password_hash,role,retailer_id,created_at) VALUES (%s,%s,%s,'retailer',%s,%s) ON CONFLICT (phone) DO NOTHING",
             (on,ph,hp("retailer123"),rids[i],ts))
     cids=[]
     for name,phone in [("Anita Verma","9000000001"),("Rahul Kapoor","9000000002")]:
-        cur.execute("INSERT INTO users (name,phone,password_hash,role,retailer_id,created_at) VALUES (%s,%s,%s,'customer',NULL,%s) RETURNING id",
+        cur.execute("INSERT INTO users (name,phone,password_hash,role,retailer_id,created_at) VALUES (%s,%s,%s,'customer',NULL,%s) ON CONFLICT (phone) DO UPDATE SET name=EXCLUDED.name RETURNING id",
             (name,phone,hp("customer123"),ts))
-        cids.append(cur.fetchone()[0])
-    for cid,rid,st,ps,items in [
-        (cids[0],rids[0],"delivered","paid",[(pids[0],2),(pids[4],3)]),
-        (cids[0],rids[0],"placed","paid",[(pids[8],1),(pids[11],2)]),
-        (cids[1],rids[1],"accepted","paid",[(pids[1],1),(pids[6],1)]),
-        (cids[1],rids[2],"dispatched","paid",[(pids[17],2),(pids[18],1)]),
-    ]:
-        total=0; lines=[]
-        for pid,qty in items:
-            cur.execute("SELECT selling_price FROM retailer_products WHERE retailer_id=%s AND product_id=%s",(rid,pid))
-            pr=cur.fetchone()[0]
-            cur.execute("SELECT name FROM products WHERE id=%s",(pid,))
-            pn=cur.fetchone()[0]
-            lt=round(pr*qty,2); total+=lt; lines.append((pid,pn,qty,pr,lt))
-        cur.execute("INSERT INTO orders (customer_id,retailer_id,status,payment_status,payment_mode,total_amount,delivery_address,created_at,updated_at) VALUES (%s,%s,%s,%s,'mock_gateway',%s,'Demo Address',%s,%s) RETURNING id",
-            (cid,rid,st,ps,round(total,2),ts,ts))
-        oid=cur.fetchone()[0]
-        for pid,pn,qty,pr,lt in lines:
-            cur.execute("INSERT INTO order_items (order_id,product_id,product_name,quantity,unit_price,line_total) VALUES (%s,%s,%s,%s,%s,%s)",
-                (oid,pid,pn,qty,pr,lt))
+        cids.append(cur.fetchone()["id"])
+    # Only seed sample orders if none exist yet
+    cur.execute("SELECT COUNT(*) as c FROM orders")
+    if cur.fetchone()["c"] == 0:
+        for cid,rid,st,ps,items in [
+            (cids[0],rids[0],"delivered","paid",[(pids[0],2),(pids[4],3)]),
+            (cids[0],rids[0],"placed","paid",[(pids[8],1),(pids[11],2)]),
+            (cids[1],rids[1],"accepted","paid",[(pids[1],1),(pids[6],1)]),
+            (cids[1],rids[2],"dispatched","paid",[(pids[17],2),(pids[18],1)]),
+        ]:
+            total=0; lines=[]
+            for pid,qty in items:
+                cur.execute("SELECT selling_price FROM retailer_products WHERE retailer_id=%s AND product_id=%s",(rid,pid))
+                pr=cur.fetchone()["selling_price"]
+                cur.execute("SELECT name FROM products WHERE id=%s",(pid,))
+                pn=cur.fetchone()["name"]
+                lt=round(pr*qty,2); total+=lt; lines.append((pid,pn,qty,pr,lt))
+            cur.execute("INSERT INTO orders (customer_id,retailer_id,status,payment_status,payment_mode,total_amount,delivery_address,created_at,updated_at) VALUES (%s,%s,%s,%s,'mock_gateway',%s,'Demo Address',%s,%s) RETURNING id",
+                (cid,rid,st,ps,round(total,2),ts,ts))
+            oid=cur.fetchone()["id"]
+            for pid,pn,qty,pr,lt in lines:
+                cur.execute("INSERT INTO order_items (order_id,product_id,product_name,quantity,unit_price,line_total) VALUES (%s,%s,%s,%s,%s,%s)",
+                    (oid,pid,pn,qty,pr,lt))
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
