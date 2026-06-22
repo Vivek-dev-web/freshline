@@ -6,31 +6,73 @@ import os, sys, datetime, hashlib, time
 from functools import wraps
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
-try:
-    import jwt
-    from flask import Flask, request, jsonify, g
-    import psycopg2
-    import psycopg2.extras
-except ImportError as e:
-    # Surface import errors clearly
-    from flask import Flask, jsonify
-    app = Flask(__name__)
-    @app.route("/api/<path:p>", methods=["GET","POST","PATCH","PUT","DELETE","OPTIONS"])
-    def import_error(p=""):
-        return jsonify({"error": f"Import failed: {e}. Check requirements.txt is at project root."}), 500
-    handler = app
-    raise
+import jwt
+from flask import Flask, request, jsonify, g
+import pg8000
+import pg8000.native
 
 # ── Database ───────────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+def _parse_url(url):
+    # Parse postgresql://user:pass@host/dbname?params into pg8000 kwargs
+    import urllib.parse
+    r = urllib.parse.urlparse(url)
+    kwargs = {
+        "host": r.hostname,
+        "port": r.port or 5432,
+        "user": r.username,
+        "password": r.password,
+        "database": r.path.lstrip("/"),
+        "ssl_context": True,  # Neon requires SSL
+    }
+    return kwargs
+
+class DictConn:
+    """Wraps pg8000 to give psycopg2-compatible dict-row interface.
+    Acts as both connection AND cursor so the same object can be passed
+    as both conn and cur throughout the codebase."""
+    def __init__(self, conn):
+        self._conn = conn
+        self._cur = conn.cursor()
+        self._cols = []
+
+    def cursor(self):
+        """Returns self so dc(conn) = conn works seamlessly."""
+        return self
+
+    def execute(self, sql, params=None):
+        if params:
+            self._cur.execute(sql, list(params))
+        else:
+            self._cur.execute(sql)
+        self._cols = [d[0] for d in (self._cur.description or [])]
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None: return None
+        return dict(zip(self._cols, row))
+
+    def fetchall(self):
+        return [dict(zip(self._cols, r)) for r in self._cur.fetchall()]
+
+    def commit(self): self._conn.commit()
+    def rollback(self): self._conn.rollback()
+    def close(self): self._conn.close()
+
+_conn_kwargs = None
+
 def get_conn():
+    global _conn_kwargs
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL env var not set in Vercel Project Settings → Environment Variables")
-    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    if _conn_kwargs is None:
+        _conn_kwargs = _parse_url(DATABASE_URL)
+    raw = pg8000.connect(**_conn_kwargs)
+    return DictConn(raw)
 
 def dc(conn):
-    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    return conn  # DictConn already acts as both conn and cursor manager
 
 def hp(raw):
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -88,15 +130,16 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 def init_db():
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(SCHEMA)
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        _seed(conn, cur)
+    conn.execute(SCHEMA)
+    conn.execute("SELECT COUNT(*) FROM users")
+    r = conn.fetchone()
+    if r is None or list(r.values())[0] == 0:
+        _seed(conn)
     conn.commit()
     conn.close()
 
-def _seed(conn, cur):
+def _seed(conn):
+    cur = conn  # DictConn acts as cursor
     ts = now()
     import random; random.seed(42)
     cats = ["Staples","Dairy & Bakery","Snacks","Beverages","Personal Care","Vegetables & Fruits"]
