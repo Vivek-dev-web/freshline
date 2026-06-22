@@ -8,10 +8,17 @@ export default function RetailerCatalogPage() {
   const [products, setProducts] = useState(null);
   const [error, setError] = useState("");
   const [savingId, setSavingId] = useState(null);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
   const navigate = useNavigate();
 
+  function loadCatalog() {
+    api.retailerOwnCatalog().then((data) => { setProducts(data); setLastRefreshed(new Date()); }).catch((e) => setError(e.message));
+  }
+
   useEffect(() => {
-    api.retailerOwnCatalog().then(setProducts).catch((e) => setError(e.message));
+    loadCatalog();
+    const id = setInterval(loadCatalog, 30000);
+    return () => clearInterval(id);
   }, []);
 
   async function handleUpdate(retailerProductId, fields) {
@@ -35,9 +42,15 @@ export default function RetailerCatalogPage() {
         { to: "/retailer", label: "Dashboard", onClick: () => navigate("/retailer") },
         { to: "/retailer/orders", label: "Orders", onClick: () => navigate("/retailer/orders") },
         { to: "/retailer/catalog", label: "Inventory & Pricing", active: true },
+        { to: "/retailer/supply-orders", label: "Supply Orders", onClick: () => navigate("/retailer/supply-orders") },
       ]}
     >
-      <h1 style={{ fontSize: 24, marginBottom: 4 }}>Inventory & pricing</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <h1 style={{ fontSize: 24 }}>Inventory & pricing</h1>
+        <span style={{ fontSize: 12, color: "var(--charcoal-300)" }}>
+          🔄 Live · refreshes every 30s{lastRefreshed ? ` · last ${lastRefreshed.toLocaleTimeString()}` : ""}
+        </span>
+      </div>
       <p style={{ color: "var(--charcoal-600)", fontSize: 14, marginBottom: 20 }}>
         Set your own selling price and stock status for each product in the master catalog.
       </p>
@@ -119,13 +132,21 @@ function ProductRow({ product, onUpdate, saving }) {
         />
       </td>
       <td style={{ padding: "10px 14px" }}>
-        <input
-          type="number"
-          value={qty}
-          onChange={(e) => setQty(e.target.value)}
-          onBlur={commitQty}
-          style={{ width: 64, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)" }}
-        />
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="number"
+            value={qty}
+            onChange={(e) => setQty(e.target.value)}
+            onBlur={commitQty}
+            style={{ width: 64, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)" }}
+          />
+          <span style={{
+            width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+            background: product.quantity <= 0 || !product.in_stock ? "var(--danger)"
+              : product.quantity < 10 ? "#f59e0b"
+              : "var(--success)",
+          }} title={product.quantity <= 0 ? "Out of stock" : product.quantity < 10 ? "Low stock" : "In stock"} />
+        </div>
       </td>
       <td style={{ padding: "10px 14px" }}>
         <button onClick={toggleStock} disabled={saving} style={{ background: "none", border: "none", padding: 0 }}>

@@ -80,6 +80,24 @@ export const api = {
 
   // Notifications
   notifications: () => request("/notifications"),
+
+  // Payments
+  payOrder: (orderId, card_last4) => request(`/orders/${orderId}/pay`, { method: "POST", body: { card_last4 } }),
+  getPayment: (orderId) => request(`/orders/${orderId}/payment`),
+
+  // Supply analytics
+  demandGaps: () => request("/admin/analytics/demand-gaps"),
+  crossRetailerDemand: () => request("/admin/analytics/cross-retailer-demand"),
+  retailerStockGaps: () => request("/admin/analytics/retailer-stock-gaps"),
+
+  // Supply orders (admin)
+  listSupplyOrders: () => request("/admin/supply-orders"),
+  createSupplyOrder: (payload) => request("/admin/supply-orders", { method: "POST", body: payload }),
+  getSupplyOrder: (id) => request(`/admin/supply-orders/${id}`),
+  updateSupplyOrderStatus: (id, status) => request(`/admin/supply-orders/${id}/status`, { method: "PATCH", body: { status } }),
+
+  // Supply orders (retailer)
+  retailerSupplyOrders: () => request("/retailer/supply-orders"),
 };
 
 export function saveSession(token, user) {

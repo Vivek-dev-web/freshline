@@ -15,6 +15,8 @@ import AdminDashboardPage from "./pages/AdminDashboardPage";
 import AdminRetailersPage from "./pages/AdminRetailersPage";
 import AdminCatalogPage from "./pages/AdminCatalogPage";
 import AdminOrdersPage from "./pages/AdminOrdersPage";
+import AdminSupplyPage from "./pages/AdminSupplyPage";
+import RetailerSupplyOrdersPage from "./pages/RetailerSupplyOrdersPage";
 
 function homeForRole(role) {
   if (role === "customer") return "/shop";
@@ -58,12 +60,14 @@ export default function App() {
       <Route path="/retailer" element={<RequireRole role="retailer"><RetailerDashboardPage /></RequireRole>} />
       <Route path="/retailer/orders" element={<RequireRole role="retailer"><RetailerOrdersPage /></RequireRole>} />
       <Route path="/retailer/catalog" element={<RequireRole role="retailer"><RetailerCatalogPage /></RequireRole>} />
+      <Route path="/retailer/supply-orders" element={<RequireRole role="retailer"><RetailerSupplyOrdersPage /></RequireRole>} />
 
       {/* Admin */}
       <Route path="/admin" element={<RequireRole role="admin"><AdminDashboardPage /></RequireRole>} />
       <Route path="/admin/retailers" element={<RequireRole role="admin"><AdminRetailersPage /></RequireRole>} />
       <Route path="/admin/catalog" element={<RequireRole role="admin"><AdminCatalogPage /></RequireRole>} />
       <Route path="/admin/orders" element={<RequireRole role="admin"><AdminOrdersPage /></RequireRole>} />
+      <Route path="/admin/supply" element={<RequireRole role="admin"><AdminSupplyPage /></RequireRole>} />
 
       <Route path="*" element={<RootRedirect />} />
     </Routes>

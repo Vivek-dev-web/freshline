@@ -30,7 +30,10 @@ export default function CartPage() {
         cart.items.map((i) => ({ retailer_product_id: i.product.retailer_product_id, quantity: i.quantity })),
         address
       );
-      setPayStage("Payment confirmed");
+      setPayStage("Processing payment…");
+      await sleep(500);
+      await api.payOrder(order.id, "4242");
+      setPayStage("Payment confirmed ✓");
       await sleep(400);
       setConfirmedOrder(order);
       setStep("confirmed");

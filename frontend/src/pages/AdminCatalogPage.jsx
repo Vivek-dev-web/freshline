@@ -38,6 +38,7 @@ export default function AdminCatalogPage() {
         { to: "/admin/retailers", label: "Retailers", onClick: () => navigate("/admin/retailers") },
         { to: "/admin/catalog", label: "Master Catalog", active: true },
         { to: "/admin/orders", label: "Order Monitoring", onClick: () => navigate("/admin/orders") },
+        { to: "/admin/supply", label: "Supply Intel", onClick: () => navigate("/admin/supply") },
       ]}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>

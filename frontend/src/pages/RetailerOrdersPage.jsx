@@ -56,6 +56,7 @@ export default function RetailerOrdersPage() {
         { to: "/retailer", label: "Dashboard", onClick: () => navigate("/retailer") },
         { to: "/retailer/orders", label: "Orders", active: true },
         { to: "/retailer/catalog", label: "Inventory & Pricing", onClick: () => navigate("/retailer/catalog") },
+        { to: "/retailer/supply-orders", label: "Supply Orders", onClick: () => navigate("/retailer/supply-orders") },
       ]}
     >
       <h1 style={{ fontSize: 24, marginBottom: 16 }}>Order queue</h1>

@@ -20,6 +20,7 @@ export default function AdminOrdersPage() {
         { to: "/admin/retailers", label: "Retailers", onClick: () => navigate("/admin/retailers") },
         { to: "/admin/catalog", label: "Master Catalog", onClick: () => navigate("/admin/catalog") },
         { to: "/admin/orders", label: "Order Monitoring", active: true },
+        { to: "/admin/supply", label: "Supply Intel", onClick: () => navigate("/admin/supply") },
       ]}
     >
       <h1 style={{ fontSize: 24, marginBottom: 4 }}>Order monitoring</h1>

@@ -126,6 +126,25 @@ CREATE TABLE IF NOT EXISTS notifications (
     id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
     message TEXT NOT NULL, is_read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS payments (
+    id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id) UNIQUE,
+    amount REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','processing','completed','failed')),
+    payment_method TEXT NOT NULL DEFAULT 'card',
+    card_last4 TEXT, payment_ref TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS supply_orders (
+    id SERIAL PRIMARY KEY, retailer_id INTEGER NOT NULL REFERENCES retailers(id),
+    status TEXT NOT NULL DEFAULT 'confirmed'
+        CHECK(status IN ('confirmed','shipped','delivered','cancelled')),
+    notes TEXT DEFAULT '', total_cost REAL NOT NULL DEFAULT 0.0,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS supply_order_items (
+    id SERIAL PRIMARY KEY, supply_order_id INTEGER NOT NULL REFERENCES supply_orders(id),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    quantity INTEGER NOT NULL, unit_cost REAL NOT NULL, line_total REAL NOT NULL
+);
 """
 
 def init_db():
@@ -234,6 +253,26 @@ def _seed(conn):
             for pid,pn,qty,pr,lt in lines:
                 cur.execute("INSERT INTO order_items (order_id,product_id,product_name,quantity,unit_price,line_total) VALUES (%s,%s,%s,%s,%s,%s)",
                     (oid,pid,pn,qty,pr,lt))
+    cur.execute("SELECT COUNT(*) as c FROM supply_orders")
+    if cur.fetchone()["c"] == 0:
+        so_seeds=[(rids[0],"confirmed",[(pids[0],50),(pids[2],30)]),
+                  (rids[1],"shipped",[(pids[4],100),(pids[8],40)]),
+                  (rids[2],"delivered",[(pids[11],60),(pids[17],80)])]
+        for so_rid,so_status,so_items in so_seeds:
+            so_total=0.0; so_lines=[]
+            for pid,qty in so_items:
+                cur.execute("SELECT base_price FROM products WHERE id=%s",(pid,))
+                pp=cur.fetchone()
+                if pp:
+                    uc=pp["base_price"]; lt=round(uc*qty,2); so_total+=lt; so_lines.append((pid,qty,uc,lt))
+            cur.execute("INSERT INTO supply_orders (retailer_id,status,notes,total_cost,created_at,updated_at) VALUES (%s,%s,'Demo seed supply',%s,%s,%s) RETURNING id",
+                (so_rid,so_status,round(so_total,2),ts,ts))
+            soid=cur.fetchone()["id"]
+            for pid,qty,uc,lt in so_lines:
+                cur.execute("INSERT INTO supply_order_items (supply_order_id,product_id,quantity,unit_cost,line_total) VALUES (%s,%s,%s,%s,%s)",
+                    (soid,pid,qty,uc,lt))
+
+LOW_STOCK_THRESHOLD = 10
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -385,16 +424,26 @@ def place_order():
         qty=item["quantity"]; lt=round(rp["selling_price"]*qty,2); total+=lt
         resolved.append((rp["product_id"],rp["product_name"],qty,rp["selling_price"],lt,rp["id"]))
     ts=now()
-    cur.execute("INSERT INTO orders (customer_id,retailer_id,status,payment_status,payment_mode,total_amount,delivery_address,created_at,updated_at) VALUES (%s,%s,'placed','paid','mock_gateway',%s,%s,%s,%s) RETURNING id",
+    cur.execute("INSERT INTO orders (customer_id,retailer_id,status,payment_status,payment_mode,total_amount,delivery_address,created_at,updated_at) VALUES (%s,%s,'placed','pending','mock_gateway',%s,%s,%s,%s) RETURNING id",
         (g.user["user_id"],rid,round(total,2),addr,ts,ts))
     oid=cur.fetchone()["id"]
+    cur.execute("INSERT INTO payments (order_id,amount,status,payment_method,created_at,updated_at) VALUES (%s,%s,'pending','card',%s,%s)",
+        (oid,round(total,2),ts,ts))
     for pid,pn,qty,pr,lt,rpid in resolved:
         cur.execute("INSERT INTO order_items (order_id,product_id,product_name,quantity,unit_price,line_total) VALUES (%s,%s,%s,%s,%s,%s)",(oid,pid,pn,qty,pr,lt))
         cur.execute("UPDATE retailer_products SET quantity=quantity-%s WHERE id=%s",(qty,rpid))
         cur.execute("UPDATE retailer_products SET in_stock=0 WHERE id=%s AND quantity<=0",(rpid,))
     cur.execute("SELECT id FROM users WHERE retailer_id=%s AND role='retailer'",(rid,))
     ru=row(cur)
-    if ru: cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",(ru["id"],f"New order #{oid} - ₹{round(total,2)}",ts))
+    if ru: cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",(ru["id"],f"New order #{oid} received — ₹{round(total,2)} (awaiting payment)",ts))
+    for pid,pn,qty,pr,lt,rpid in resolved:
+        cur.execute("SELECT rp.quantity FROM retailer_products rp WHERE rp.id=%s",(rpid,))
+        sc=row(cur)
+        if sc and 0 <= sc["quantity"] < LOW_STOCK_THRESHOLD:
+            alert=f"Low stock: {pn} — {sc['quantity']} units left"
+            if ru: cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",(ru["id"],alert,ts))
+            cur.execute("SELECT id FROM users WHERE role='admin'")
+            for a in rows(cur): cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",(a["id"],alert,ts))
     conn.commit()
     cur.execute("SELECT * FROM orders WHERE id=%s",(oid,)); r=row(cur); conn.close()
     return jsonify(r),201
@@ -603,6 +652,178 @@ def mark_read(nid):
     conn=get_conn(); cur=dc(conn)
     cur.execute("UPDATE notifications SET is_read=1 WHERE id=%s AND user_id=%s",(nid,g.user["user_id"]))
     conn.commit(); conn.close(); return jsonify({"ok":True})
+
+# ── Payments ───────────────────────────────────────────────────────────────────
+@app.route("/api/orders/<int:oid>/pay",methods=["POST"])
+@auth_required(roles=["customer"])
+def pay_order(oid):
+    data=request.get_json(force=True) or {}
+    card_last4=str(data.get("card_last4","0000"))[-4:]
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("SELECT * FROM orders WHERE id=%s",(oid,)); o=row(cur)
+    if not o or o["customer_id"]!=g.user["user_id"]: conn.close(); return jsonify({"error":"Not found"}),404
+    if o["payment_status"]=="paid": conn.close(); return jsonify({"error":"Already paid"}),409
+    ts=now()
+    import string as _str
+    ref="PAY"+"".join(__import__("random").choices(_str.ascii_uppercase+_str.digits,k=10))
+    cur.execute("SELECT id FROM payments WHERE order_id=%s",(oid,))
+    ep=row(cur)
+    if ep:
+        cur.execute("UPDATE payments SET status='completed',card_last4=%s,payment_ref=%s,updated_at=%s WHERE order_id=%s",(card_last4,ref,ts,oid))
+    else:
+        cur.execute("INSERT INTO payments (order_id,amount,status,payment_method,card_last4,payment_ref,created_at,updated_at) VALUES (%s,%s,'completed','card',%s,%s,%s,%s)",
+            (oid,o["total_amount"],card_last4,ref,ts,ts))
+    cur.execute("UPDATE orders SET payment_status='paid',updated_at=%s WHERE id=%s",(ts,oid))
+    cur.execute("SELECT id FROM users WHERE retailer_id=%s AND role='retailer'",(o["retailer_id"],))
+    ru=row(cur)
+    if ru: cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",
+        (ru["id"],f"Payment received for Order #{oid} — ₹{o['total_amount']:.2f}",ts))
+    conn.commit(); cur.execute("SELECT * FROM orders WHERE id=%s",(oid,)); r=row(cur); conn.close()
+    return jsonify({**r,"payment_ref":ref})
+
+@app.route("/api/orders/<int:oid>/payment")
+@auth_required()
+def get_payment(oid):
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("SELECT * FROM payments WHERE order_id=%s",(oid,)); p=row(cur); conn.close()
+    if not p: return jsonify({"error":"Not found"}),404
+    return jsonify(p)
+
+# ── Supply Analytics ───────────────────────────────────────────────────────────
+@app.route("/api/admin/analytics/demand-gaps")
+@auth_required(roles=["admin"])
+def demand_gaps():
+    conn=get_conn(); cur=dc(conn)
+    cutoff=(datetime.date.today()-datetime.timedelta(days=30)).isoformat()
+    cur.execute("""
+        SELECT rp.id as retailer_product_id, p.name as product_name, p.image_emoji,
+               r.store_name, rp.quantity, rp.in_stock,
+               COALESCE(SUM(oi.quantity),0) as units_ordered_30d
+        FROM retailer_products rp
+        JOIN products p ON p.id=rp.product_id
+        JOIN retailers r ON r.id=rp.retailer_id
+        LEFT JOIN order_items oi ON oi.product_id=rp.product_id
+        LEFT JOIN orders o ON o.id=oi.order_id AND o.retailer_id=rp.retailer_id AND o.created_at >= %s
+        WHERE rp.quantity < 10 OR rp.in_stock=0
+        GROUP BY rp.id,p.name,p.image_emoji,r.store_name,rp.quantity,rp.in_stock
+        ORDER BY rp.in_stock ASC, rp.quantity ASC
+    """,(cutoff,))
+    r=rows(cur); conn.close(); return jsonify(r)
+
+@app.route("/api/admin/analytics/cross-retailer-demand")
+@auth_required(roles=["admin"])
+def cross_retailer_demand():
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("""
+        SELECT p.id as product_id, p.name as product_name, p.image_emoji,
+               r.id as retailer_id, r.store_name,
+               COALESCE(SUM(oi.quantity),0) as total_qty,
+               COALESCE(SUM(oi.line_total),0) as total_revenue
+        FROM products p
+        CROSS JOIN retailers r
+        LEFT JOIN order_items oi ON oi.product_id=p.id
+        LEFT JOIN orders o ON o.id=oi.order_id AND o.retailer_id=r.id
+        GROUP BY p.id,p.name,p.image_emoji,r.id,r.store_name
+        ORDER BY total_qty DESC
+    """)
+    r=rows(cur); conn.close(); return jsonify(r)
+
+@app.route("/api/admin/analytics/retailer-stock-gaps")
+@auth_required(roles=["admin"])
+def retailer_stock_gaps():
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("""
+        SELECT p.name as product_name, p.image_emoji, p.id as product_id,
+               r.store_name, r.id as retailer_id,
+               COALESCE(rp.in_stock,-1) as in_stock,
+               COALESCE(rp.quantity,0) as quantity,
+               CASE WHEN rp.id IS NULL THEN 'missing'
+                    WHEN rp.in_stock=0 THEN 'out_of_stock'
+                    ELSE 'low_stock' END as gap_type
+        FROM products p
+        CROSS JOIN retailers r
+        LEFT JOIN retailer_products rp ON rp.product_id=p.id AND rp.retailer_id=r.id
+        WHERE rp.id IS NULL OR rp.in_stock=0 OR rp.quantity < 5
+        ORDER BY r.store_name, p.name
+    """)
+    r=rows(cur); conn.close(); return jsonify(r)
+
+# ── Supply Orders ──────────────────────────────────────────────────────────────
+@app.route("/api/admin/supply-orders",methods=["GET"])
+@auth_required(roles=["admin"])
+def list_supply_orders():
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("SELECT so.*,r.store_name FROM supply_orders so JOIN retailers r ON r.id=so.retailer_id ORDER BY so.created_at DESC")
+    sos=rows(cur)
+    for so in sos:
+        cur.execute("SELECT soi.*,p.name as product_name,p.image_emoji FROM supply_order_items soi JOIN products p ON p.id=soi.product_id WHERE soi.supply_order_id=%s",(so["id"],))
+        so["items"]=rows(cur)
+    conn.close(); return jsonify(sos)
+
+@app.route("/api/admin/supply-orders",methods=["POST"])
+@auth_required(roles=["admin"])
+def create_supply_order():
+    data=request.get_json(force=True)
+    rid=data.get("retailer_id"); items=data.get("items",[]); notes=data.get("notes","")
+    if not rid or not items: return jsonify({"error":"retailer_id and items required"}),400
+    conn=get_conn(); cur=dc(conn); ts=now(); total=0.0; resolved=[]
+    for item in items:
+        cur.execute("SELECT * FROM products WHERE id=%s",(item["product_id"],)); p=row(cur)
+        if not p: conn.close(); return jsonify({"error":f"Product {item['product_id']} not found"}),400
+        qty=int(item["quantity"]); uc=float(item.get("unit_cost",p["base_price"])); lt=round(uc*qty,2); total+=lt
+        resolved.append((item["product_id"],qty,uc,lt))
+    cur.execute("INSERT INTO supply_orders (retailer_id,status,notes,total_cost,created_at,updated_at) VALUES (%s,'confirmed',%s,%s,%s,%s) RETURNING id",
+        (rid,notes,round(total,2),ts,ts))
+    soid=cur.fetchone()["id"]
+    for pid,qty,uc,lt in resolved:
+        cur.execute("INSERT INTO supply_order_items (supply_order_id,product_id,quantity,unit_cost,line_total) VALUES (%s,%s,%s,%s,%s)",(soid,pid,qty,uc,lt))
+    cur.execute("SELECT id FROM users WHERE retailer_id=%s AND role='retailer'",(rid,)); ru=row(cur)
+    if ru: cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",
+        (ru["id"],f"Supply order SO-{soid:04d} confirmed — {len(resolved)} product(s) incoming",ts))
+    conn.commit(); cur.execute("SELECT * FROM supply_orders WHERE id=%s",(soid,)); r=row(cur); conn.close()
+    return jsonify(r),201
+
+@app.route("/api/admin/supply-orders/<int:soid>")
+@auth_required(roles=["admin"])
+def get_supply_order(soid):
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("SELECT so.*,r.store_name FROM supply_orders so JOIN retailers r ON r.id=so.retailer_id WHERE so.id=%s",(soid,))
+    so=row(cur)
+    if not so: conn.close(); return jsonify({"error":"Not found"}),404
+    cur.execute("SELECT soi.*,p.name as product_name,p.image_emoji FROM supply_order_items soi JOIN products p ON p.id=soi.product_id WHERE soi.supply_order_id=%s",(soid,))
+    so["items"]=rows(cur); conn.close(); return jsonify(so)
+
+@app.route("/api/admin/supply-orders/<int:soid>/status",methods=["PATCH"])
+@auth_required(roles=["admin"])
+def update_supply_order_status(soid):
+    ns=(request.get_json(force=True) or {}).get("status")
+    if ns not in ("shipped","delivered","cancelled"): return jsonify({"error":"Invalid status"}),400
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("SELECT * FROM supply_orders WHERE id=%s",(soid,)); so=row(cur)
+    if not so: conn.close(); return jsonify({"error":"Not found"}),404
+    ts=now()
+    cur.execute("UPDATE supply_orders SET status=%s,updated_at=%s WHERE id=%s",(ns,ts,soid))
+    if ns=="delivered":
+        cur.execute("SELECT * FROM supply_order_items WHERE supply_order_id=%s",(soid,))
+        for item in rows(cur):
+            cur.execute("UPDATE retailer_products SET quantity=quantity+%s,in_stock=1 WHERE retailer_id=%s AND product_id=%s",
+                (item["quantity"],so["retailer_id"],item["product_id"]))
+        cur.execute("SELECT id FROM users WHERE retailer_id=%s AND role='retailer'",(so["retailer_id"],)); ru=row(cur)
+        if ru: cur.execute("INSERT INTO notifications (user_id,message,created_at) VALUES (%s,%s,%s)",
+            (ru["id"],f"Supply order SO-{soid:04d} delivered — your inventory has been updated",ts))
+    conn.commit(); cur.execute("SELECT * FROM supply_orders WHERE id=%s",(soid,)); r=row(cur); conn.close()
+    return jsonify(r)
+
+@app.route("/api/retailer/supply-orders")
+@auth_required(roles=["retailer"])
+def retailer_supply_orders():
+    conn=get_conn(); cur=dc(conn)
+    cur.execute("SELECT * FROM supply_orders WHERE retailer_id=%s ORDER BY created_at DESC",(g.user["retailer_id"],))
+    sos=rows(cur)
+    for so in sos:
+        cur.execute("SELECT soi.*,p.name as product_name,p.image_emoji FROM supply_order_items soi JOIN products p ON p.id=soi.product_id WHERE soi.supply_order_id=%s",(so["id"],))
+        so["items"]=rows(cur)
+    conn.close(); return jsonify(sos)
 
 # Vercel entry point
 handler = app

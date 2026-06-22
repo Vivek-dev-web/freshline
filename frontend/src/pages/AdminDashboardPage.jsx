@@ -25,6 +25,7 @@ export default function AdminDashboardPage() {
         { to: "/admin/retailers", label: "Retailers", onClick: () => navigate("/admin/retailers") },
         { to: "/admin/catalog", label: "Master Catalog", onClick: () => navigate("/admin/catalog") },
         { to: "/admin/orders", label: "Order Monitoring", onClick: () => navigate("/admin/orders") },
+        { to: "/admin/supply", label: "Supply Intel", onClick: () => navigate("/admin/supply") },
       ]}
     >
       <h1 style={{ fontSize: 24, marginBottom: 4 }}>Platform overview</h1>

@@ -20,6 +20,7 @@ export default function RetailerDashboardPage() {
         { to: "/retailer", label: "Dashboard", active: true },
         { to: "/retailer/orders", label: "Orders", onClick: () => navigate("/retailer/orders") },
         { to: "/retailer/catalog", label: "Inventory & Pricing", onClick: () => navigate("/retailer/catalog") },
+        { to: "/retailer/supply-orders", label: "Supply Orders", onClick: () => navigate("/retailer/supply-orders") },
       ]}
     >
       <h1 style={{ fontSize: 24, marginBottom: 4 }}>Today at a glance</h1>
