@@ -28,7 +28,19 @@ def ensure_db():
 
 @app.before_request
 def before():
-    ensure_db()
+    # Skip DB init for OPTIONS preflight and health check
+    if request.method == 'OPTIONS' or request.path == '/api/health':
+        return
+    try:
+        ensure_db()
+    except Exception as e:
+        return jsonify({'error': f'Database initialization failed: {str(e)}'}), 500
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    return jsonify({'error': str(e), 'trace': traceback.format_exc()[-800:]}), 500
 
 
 @app.after_request
@@ -643,7 +655,19 @@ def mark_read(nid):
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "freshline-api"})
+    import os
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return jsonify({"status": "error", "error": "DATABASE_URL not set"}), 500
+    try:
+        conn = get_conn()
+        cur = dict_cursor(conn)
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        count = cur.fetchone()["count"]
+        conn.close()
+        return jsonify({"status": "ok", "service": "freshline-api", "db_users": count})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 # Vercel entry point

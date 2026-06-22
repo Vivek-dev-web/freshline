@@ -1,8 +1,5 @@
 """
 Database layer — PostgreSQL (Neon) for production deployment.
-Uses psycopg2 with connection pooling via DATABASE_URL env var.
-Schema is identical to the SQLite demo; only the connection and
-a few SQL idioms differ (SERIAL vs AUTOINCREMENT, %s vs ?).
 """
 import os
 import datetime
@@ -14,7 +11,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
 def get_conn():
-    conn = psycopg2.connect(DATABASE_URL)
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is not set. Add it in Vercel → Project Settings → Environment Variables.")
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
     return conn
 
 
@@ -117,9 +116,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-    # Run schema
     cur.execute(SCHEMA)
-    # Check if already seeded
     cur.execute("SELECT COUNT(*) FROM users")
     count = cur.fetchone()[0]
     if count == 0:
@@ -131,14 +128,12 @@ def init_db():
 def _seed(conn, cur):
     ts = now()
 
-    # Categories
     categories = ["Staples", "Dairy & Bakery", "Snacks", "Beverages", "Personal Care", "Vegetables & Fruits"]
     cat_ids = {}
     for c in categories:
         cur.execute("INSERT INTO categories (name) VALUES (%s) RETURNING id", (c,))
         cat_ids[c] = cur.fetchone()[0]
 
-    # Retailers
     retailers = [
         ("Sharma General Store", "Ramesh Sharma", "Andheri West, Mumbai", "9820011111"),
         ("Quick Mart Bandra", "Priya Mehta", "Bandra East, Mumbai", "9820022222"),
@@ -152,7 +147,6 @@ def _seed(conn, cur):
         )
         retailer_ids.append(cur.fetchone()[0])
 
-    # Products
     products = [
         ("Toor Dal", "Tata Sampann", "Staples", "1 kg", 145.0, 5.0, "🫘"),
         ("Basmati Rice", "India Gate", "Staples", "5 kg", 520.0, 5.0, "🍚"),
@@ -175,9 +169,9 @@ def _seed(conn, cur):
         ("Tomato", "Farm Fresh", "Vegetables & Fruits", "1 kg", 40.0, 0.0, "🍅"),
         ("Banana", "Farm Fresh", "Vegetables & Fruits", "1 dozen", 60.0, 0.0, "🍌"),
     ]
-    product_ids = []
     import random
     random.seed(42)
+    product_ids = []
     for i, (name, brand, cat, pack, price, gst, emoji) in enumerate(products):
         sku = f"SKU{1000 + i}"
         cur.execute(
@@ -187,7 +181,6 @@ def _seed(conn, cur):
         )
         product_ids.append(cur.fetchone()[0])
 
-    # Retailer products
     for r_id in retailer_ids:
         for p_id, (_, _, _, _, price, _, _) in zip(product_ids, products):
             markup = random.uniform(1.03, 1.12)
@@ -199,16 +192,14 @@ def _seed(conn, cur):
                 (r_id, p_id, selling_price, in_stock, qty),
             )
 
-    # Users
     cur.execute(
         "INSERT INTO users (name, phone, password_hash, role, retailer_id, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
         ("Platform Admin", "9999999999", hash_password("admin123"), "admin", None, ts),
     )
     for idx, r_id in enumerate(retailer_ids):
-        phone = retailers[idx][3]
         cur.execute(
             "INSERT INTO users (name, phone, password_hash, role, retailer_id, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
-            (retailers[idx][1], phone, hash_password("retailer123"), "retailer", r_id, ts),
+            (retailers[idx][1], retailers[idx][3], hash_password("retailer123"), "retailer", r_id, ts),
         )
     customer_ids = []
     for name, phone in [("Anita Verma", "9000000001"), ("Rahul Kapoor", "9000000002")]:
@@ -218,12 +209,11 @@ def _seed(conn, cur):
         )
         customer_ids.append(cur.fetchone()[0])
 
-    # Sample orders
     sample_orders = [
         (customer_ids[0], retailer_ids[0], "delivered", "paid", [(product_ids[0], 2), (product_ids[4], 3)]),
-        (customer_ids[0], retailer_ids[0], "placed", "paid", [(product_ids[8], 1), (product_ids[11], 2)]),
-        (customer_ids[1], retailer_ids[1], "accepted", "paid", [(product_ids[1], 1), (product_ids[6], 1)]),
-        (customer_ids[1], retailer_ids[2], "dispatched", "paid", [(product_ids[17], 2), (product_ids[18], 1)]),
+        (customer_ids[0], retailer_ids[0], "placed",    "paid", [(product_ids[8], 1), (product_ids[11], 2)]),
+        (customer_ids[1], retailer_ids[1], "accepted",  "paid", [(product_ids[1], 1), (product_ids[6], 1)]),
+        (customer_ids[1], retailer_ids[2], "dispatched","paid", [(product_ids[17], 2), (product_ids[18], 1)]),
     ]
     for cust_id, ret_id, status, pay_status, items in sample_orders:
         total = 0.0
@@ -237,7 +227,9 @@ def _seed(conn, cur):
             total += line_total
             line_items.append((p_id, pname, qty, price, line_total))
         cur.execute(
-            "INSERT INTO orders (customer_id, retailer_id, status, payment_status, payment_mode, total_amount, delivery_address, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            """INSERT INTO orders (customer_id, retailer_id, status, payment_status, payment_mode,
+               total_amount, delivery_address, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (cust_id, ret_id, status, pay_status, "mock_gateway", round(total, 2), "Demo Address, Mumbai", ts, ts),
         )
         order_id = cur.fetchone()[0]
