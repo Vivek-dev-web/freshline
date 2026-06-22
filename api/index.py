@@ -130,10 +130,14 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 def init_db():
     conn = get_conn()
-    conn.execute(SCHEMA)
-    conn.execute("SELECT COUNT(*) FROM users")
+    # pg8000 requires one statement per execute call
+    for stmt in [s.strip() for s in SCHEMA.split(";") if s.strip()]:
+        conn.execute(stmt)
+    conn.commit()
+    conn.execute("SELECT COUNT(*) as c FROM users")
     r = conn.fetchone()
-    if r is None or list(r.values())[0] == 0:
+    count = r["c"] if r else 0
+    if count == 0:
         _seed(conn)
     conn.commit()
     conn.close()
@@ -261,6 +265,7 @@ def health():
     if not DATABASE_URL:
         return jsonify({"status":"error","error":"DATABASE_URL not set in Vercel env vars"}), 500
     try:
+        ensure_db()   # create schema + seed if needed
         conn=get_conn(); cur=dc(conn)
         cur.execute("SELECT COUNT(*) as c FROM users")
         n=cur.fetchone()["c"]; conn.close()
